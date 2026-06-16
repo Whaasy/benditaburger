@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { ShoppingCart, X, Plus, Minus, Trash2, Search, Store, Clock, Info, CheckCircle2, ArrowLeft, Send, ChevronDown, ChevronUp } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -82,6 +82,163 @@ function CheckoutBull({ negocio, carrito, total, onBack, brandColor, brandTextCo
     const [errorDireccion, setErrorDireccion] = useState("");
     const [expandedItems, setExpandedItems] = useState({});
 
+    // Estados para el selector de Google Maps
+    const [coordenadas, setCoordenadas] = useState(null); // { lat, lng }
+    const [mapaAbierto, setMapaAbierto] = useState(false);
+    const [buscandoUbicacion, setBuscandoUbicacion] = useState(false);
+    const [leafletCargado, setLeafletCargado] = useState(false);
+    const [LInstance, setLInstance] = useState(null);
+
+    const mapRef = useRef(null);
+    const markerRef = useRef(null);
+
+    // Cargar Leaflet dinámicamente cuando el mapa se abre
+    useEffect(() => {
+        if (!mapaAbierto || leafletCargado) return;
+
+        if (!document.getElementById("leaflet-css")) {
+            const link = document.createElement("link");
+            link.id = "leaflet-css";
+            link.rel = "stylesheet";
+            link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+            document.head.appendChild(link);
+        }
+
+        if (!window.L) {
+            const script = document.createElement("script");
+            script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+            script.onload = () => {
+                setLInstance(window.L);
+                setLeafletCargado(true);
+            };
+            document.body.appendChild(script);
+        } else {
+            setLInstance(window.L);
+            setLeafletCargado(true);
+        }
+    }, [mapaAbierto, leafletCargado]);
+
+    // Inicializar y controlar el mapa de Leaflet
+    useEffect(() => {
+        if (!leafletCargado || !LInstance || !mapaAbierto) return;
+
+        const mapContainer = document.getElementById("map-selector");
+        if (!mapContainer) return;
+
+        // Limpiar instancia previa si existe
+        if (mapRef.current) {
+            mapRef.current.remove();
+        }
+
+        // Lat/lng default: Buenos Aires si no hay coordenadas guardadas
+        const defaultLat = coordenadas?.lat || -34.6037;
+        const defaultLng = coordenadas?.lng || -58.3816;
+
+        // Corregir paths de iconos de Leaflet en Next.js
+        delete LInstance.Icon.Default.prototype._getIconUrl;
+        LInstance.Icon.Default.mergeOptions({
+            iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+            iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+            shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+        });
+
+        const map = LInstance.map("map-selector").setView([defaultLat, defaultLng], 15);
+        mapRef.current = map;
+
+        LInstance.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+
+        const marker = LInstance.marker([defaultLat, defaultLng], {
+            draggable: true
+        }).addTo(map);
+        markerRef.current = marker;
+
+        const updateAddressFromLatLng = async (lat, lng) => {
+            try {
+                const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`);
+                const data = await res.json();
+                if (data && data.display_name) {
+                    const addressParts = data.address;
+                    const street = addressParts.road || addressParts.pedestrian || "";
+                    const number = addressParts.house_number || "";
+                    const city = addressParts.city || addressParts.town || addressParts.village || addressParts.suburb || "";
+                    const formatted = `${street} ${number}${street && number ? ', ' : ''}${city}`.trim();
+                    setDireccion(formatted || data.display_name);
+                }
+            } catch (e) {
+                console.error("Error reverse-geocoding", e);
+            }
+        };
+
+        // Si es la primera vez que se abre y no tenemos coordenadas previas, intentar geolocalizar
+        if (!coordenadas) {
+            obtenerUbicacionActual();
+        }
+
+        // Al terminar de arrastrar el marcador
+        marker.on("dragend", async () => {
+            const position = marker.getLatLng();
+            setCoordenadas({ lat: position.lat, lng: position.lng });
+            await updateAddressFromLatLng(position.lat, position.lng);
+        });
+
+        // Al hacer clic en el mapa
+        map.on("click", async (e) => {
+            const position = e.latlng;
+            marker.setLatLng(position);
+            setCoordenadas({ lat: position.lat, lng: position.lng });
+            await updateAddressFromLatLng(position.lat, position.lng);
+        });
+
+        return () => {
+            if (mapRef.current) {
+                mapRef.current.remove();
+                mapRef.current = null;
+            }
+        };
+    }, [leafletCargado, LInstance, mapaAbierto]);
+
+    const obtenerUbicacionActual = () => {
+        if (!navigator.geolocation) {
+            alert("Tu navegador no soporta geolocalización.");
+            return;
+        }
+        setBuscandoUbicacion(true);
+        navigator.geolocation.getCurrentPosition(
+            async (position) => {
+                const { latitude, longitude } = position.coords;
+                setCoordenadas({ lat: latitude, lng: longitude });
+                setBuscandoUbicacion(false);
+
+                if (mapRef.current && markerRef.current) {
+                    mapRef.current.setView([latitude, longitude], 17);
+                    markerRef.current.setLatLng([latitude, longitude]);
+                }
+
+                try {
+                    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`);
+                    const data = await res.json();
+                    if (data && data.display_name) {
+                        const addressParts = data.address;
+                        const street = addressParts.road || addressParts.pedestrian || "";
+                        const number = addressParts.house_number || "";
+                        const city = addressParts.city || addressParts.town || addressParts.village || addressParts.suburb || "";
+                        const formatted = `${street} ${number}${street && number ? ', ' : ''}${city}`.trim();
+                        setDireccion(formatted || data.display_name);
+                    }
+                } catch (e) {
+                    console.error("Error reverse-geocoding", e);
+                }
+            },
+            (error) => {
+                console.error("Error getting geolocation", error);
+                setBuscandoUbicacion(false);
+            },
+            { enableHighAccuracy: true }
+        );
+    };
+
     const toggleExpand = (idUnico) => {
         setExpandedItems(prev => ({ ...prev, [idUnico]: !prev[idUnico] }));
     };
@@ -108,6 +265,9 @@ function CheckoutBull({ negocio, carrito, total, onBack, brandColor, brandTextCo
         msg += `*Método de entrega:* ${entrega === "delivery" ? "Envío a domicilio" : "Retiro en local"}\n`;
         if (entrega === "delivery") {
             msg += `*Dirección:* ${direccion}\n`;
+            if (coordenadas) {
+                msg += `*Ubicación (Google Maps):* https://maps.google.com/?q=${coordenadas.lat},${coordenadas.lng}\n`;
+            }
         }
         msg += `*Método de pago:* ${pago === "efectivo" ? "Efectivo" : "Transferencia"}\n`;
         if (aclaraciones.trim()) {
@@ -193,19 +353,89 @@ function CheckoutBull({ negocio, carrito, total, onBack, brandColor, brandTextCo
                     </div>
 
                     {entrega === "delivery" && (
-                        <div className="animate-slide-up mt-4">
-                            <label className="block text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] mb-1">Dirección de Entrega</label>
-                            <input
-                                type="text"
-                                placeholder="Ej: Av. Santa Fe 1234, CABA - Depto 4B"
-                                value={direccion}
-                                onChange={(e) => setDireccion(e.target.value)}
-                                className="w-full bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-main)] text-sm rounded-xl px-4 py-3 bull-input transition-all"
-                            />
-                            {errorDireccion && <p className="text-red-500 text-xs font-bold mt-1.5">{errorDireccion}</p>}
+                        <div className="animate-slide-up mt-4 space-y-3">
+                            <div>
+                                <label className="block text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] mb-1">Dirección de Entrega</label>
+                                <input
+                                    type="text"
+                                    placeholder="Ej: Av. Santa Fe 1234, CABA - Depto 4B"
+                                    value={direccion}
+                                    onChange={(e) => setDireccion(e.target.value)}
+                                    className="w-full bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-main)] text-sm rounded-xl px-4 py-3 bull-input transition-all"
+                                />
+                                {errorDireccion && <p className="text-red-500 text-xs font-bold mt-1.5">{errorDireccion}</p>}
+                            </div>
+                            
+                            <button
+                                type="button"
+                                onClick={() => setMapaAbierto(true)}
+                                className="w-full py-2.5 bg-[var(--bg-main)] hover:bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] font-black rounded-xl transition-all text-xs flex items-center justify-center gap-2 uppercase tracking-wider"
+                            >
+                                📍 Seleccionar en el mapa
+                                {coordenadas && <span className="text-[var(--brand)] text-[9px] font-black">(Ubicación Fijada)</span>}
+                            </button>
                         </div>
                     )}
                 </div>
+
+                {/* MODAL DEL MAPA */}
+                {mapaAbierto && (
+                    <div className="fixed inset-0 bg-black/80 z-[110] flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+                        <div className="bg-[var(--bg-card)] border border-[var(--border)] w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+                            <div className="p-5 flex justify-between items-center border-b border-[var(--border)]">
+                                <h3 className="font-black text-sm uppercase tracking-wider text-[var(--text-main)]">Seleccionar Ubicación</h3>
+                                <button 
+                                    onClick={() => setMapaAbierto(false)} 
+                                    className="w-8 h-8 rounded-full border border-[var(--border)] flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-hover)] transition-colors"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                            
+                            <div className="p-4 flex-1 flex flex-col gap-4">
+                                <button
+                                    type="button"
+                                    onClick={obtenerUbicacionActual}
+                                    className="w-full py-2.5 bg-[var(--brand-soft)] hover:bg-[var(--brand-medium)] border border-[var(--brand)] text-[var(--brand)] font-black rounded-xl transition-all text-xs flex items-center justify-center gap-2 uppercase tracking-wider"
+                                >
+                                    {buscandoUbicacion ? "Buscando ubicación..." : "📍 Usar mi ubicación actual"}
+                                </button>
+                                
+                                <div 
+                                    id="map-selector" 
+                                    className="w-full h-[300px] md:h-[350px] rounded-2xl overflow-hidden border border-[var(--border)] bg-[var(--bg-main)] z-10"
+                                >
+                                    {!leafletCargado && (
+                                        <div className="w-full h-full flex items-center justify-center text-xs text-[var(--text-muted)] font-bold">
+                                            Cargando mapa interactivo...
+                                        </div>
+                                    )}
+                                </div>
+                                
+                                <p className="text-[10px] text-[var(--text-muted)] leading-relaxed italic text-center font-medium">
+                                    Arrastrá el marcador rojo o hacé clic en el mapa para marcar tu dirección exacta.
+                                </p>
+                            </div>
+                            
+                            <div className="p-4 bg-[var(--bg-main)] border-t border-[var(--border)] flex gap-3">
+                                <button 
+                                    type="button"
+                                    onClick={() => setMapaAbierto(false)}
+                                    className="flex-1 py-3 bg-[var(--bg-card)] border border-[var(--border)] hover:bg-[var(--bg-hover)] text-[var(--text-main)] font-bold rounded-xl text-xs transition-all uppercase tracking-wider"
+                                >
+                                    Cancelar
+                                </button>
+                                <button 
+                                    type="button"
+                                    onClick={() => setMapaAbierto(false)}
+                                    className="flex-1 py-3 bg-[var(--brand)] text-[var(--brand-text)] hover:opacity-90 font-black rounded-xl text-xs transition-all uppercase tracking-wider"
+                                >
+                                    Confirmar Ubicación
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {/* Forma de Pago */}
                 <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-5 space-y-4 shadow-sm">
